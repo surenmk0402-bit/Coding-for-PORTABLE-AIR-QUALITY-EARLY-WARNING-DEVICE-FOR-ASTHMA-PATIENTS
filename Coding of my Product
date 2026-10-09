@@ -1,0 +1,1321 @@
+//====================================================
+// BLYNK CONFIGURATION
+//====================================================
+
+#define BLYNK_TEMPLATE_ID "TMPL6wQQpFL_m"
+#define BLYNK_TEMPLATE_NAME "Portable Air Quality Monitoring System"
+#define BLYNK_AUTH_TOKEN "BI44ahldYdbkHZ9tBHAuTFgQ_cOcEnfD"
+
+
+//====================================================
+// LIBRARIES
+//====================================================
+
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#include <DHT.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SDS011.h>
+
+// Use ESP32 hardware UART for SDS011 instead of software serial.
+// This is more reliable for the SDS011 9600-baud data stream.
+HardwareSerial sdsSerial(2);
+
+
+//====================================================
+// WIFI
+//====================================================
+
+// IMPORTANT: Replace these with your own credentials.
+char ssid[] = "iPhone";
+char pass[] = "suren2124";
+
+
+//====================================================
+// SENSOR PINS
+//====================================================
+
+// DHT22
+#define DHTPIN 4
+#define DHTTYPE DHT22
+
+// MQ135
+#define MQ135_PIN 34
+
+// Physical Traffic Light LEDs
+#define GREEN_LED 27
+#define YELLOW_LED 26
+#define RED_LED 25
+
+// Passive Buzzer
+#define BUZZER 14
+
+// Reset Push Button
+#define RESET_BUTTON 19
+
+// SDS011
+#define SDS_RX 16
+#define SDS_TX 17
+
+
+//====================================================
+// BLYNK VIRTUAL PINS
+//====================================================
+
+// Blynk sensor datastreams - MATCH YOUR BLYNK DASHBOARD
+#define VPIN_PM25        V0   // Fine Dust
+#define VPIN_PM10        V1   // Inhalable Dust
+#define VPIN_GAS         V2   // Gas Level
+#define VPIN_TEMPERATURE V3   // Temperature
+#define VPIN_HUMIDITY    V4   // Humidity
+#define VPIN_STATUS      V5   // Air Quality Status
+
+// New Blynk traffic-light datastreams
+#define VPIN_GREEN_LED   V8
+#define VPIN_YELLOW_LED  V9
+#define VPIN_RED_LED     V10
+
+
+//====================================================
+// OBJECTS
+//====================================================
+
+DHT dht(DHTPIN, DHTTYPE);
+
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+SDS011 my_sds;
+
+
+//====================================================
+// SENSOR VARIABLES
+//====================================================
+
+float temperature = 0.0;
+float humidity = 0.0;
+
+float pm25 = 0.0;
+float pm10 = 0.0;
+
+int gasValue = 0;
+
+
+//====================================================
+// AIR QUALITY STATUS
+//====================================================
+
+String airStatus = "GOOD";
+
+
+//====================================================
+// THRESHOLDS
+//====================================================
+
+//----------------------------------------------------
+// PM2.5
+//----------------------------------------------------
+
+const float PM25_MODERATE = 95.0;
+const float PM25_HIGH = 125.0;
+
+
+//----------------------------------------------------
+// PM10
+//----------------------------------------------------
+
+const float PM10_MODERATE = 60.0;
+const float PM10_HIGH = 125.0;
+
+
+//----------------------------------------------------
+// MQ135 RAW GAS VALUE
+//----------------------------------------------------
+
+const int GAS_MODERATE = 790;
+const int GAS_HIGH = 810;
+
+
+//----------------------------------------------------
+// TEMPERATURE
+//
+// Malaysia tropical climate project thresholds
+//----------------------------------------------------
+
+const float TEMP_LOW_HIGH = 16.0;
+const float TEMP_LOW_MODERATE = 21.0;
+
+const float TEMP_HIGH_MODERATE = 37.0;
+const float TEMP_HIGH_HIGH = 39.0;
+
+
+//----------------------------------------------------
+// HUMIDITY
+//----------------------------------------------------
+
+const float HUM_LOW_HIGH = 30.0;
+const float HUM_LOW_MODERATE = 40.0;
+
+const float HUM_HIGH_MODERATE = 70.0;
+const float HUM_HIGH_HIGH = 80.0;
+
+
+//====================================================
+// BUZZER
+//====================================================
+
+unsigned long previousBuzzerMillis = 0;
+
+bool buzzerState = false;
+
+const int BUZZER_FREQUENCY = 2000;
+const int BUZZER_RESOLUTION = 8;
+
+
+//====================================================
+// SENSOR TIMING
+//====================================================
+
+// MQ135 reads quickly
+const unsigned long MQ_INTERVAL = 100;
+
+// SDS011
+const unsigned long SDS_INTERVAL = 1000;
+
+// DHT22
+const unsigned long DHT_INTERVAL = 2000;
+
+// LCD
+const unsigned long LCD_INTERVAL = 2000;
+
+// Blynk
+const unsigned long BLYNK_INTERVAL = 2000;
+
+// WiFi / Blynk connection check
+const unsigned long CONNECTION_INTERVAL = 5000;
+
+
+//====================================================
+// TIMING VARIABLES
+//====================================================
+
+unsigned long previousMQ = 0;
+unsigned long previousSDS = 0;
+unsigned long previousDHT = 0;
+unsigned long previousLCD = 0;
+unsigned long previousBlynk = 0;
+unsigned long previousConnectionCheck = 0;
+
+// WiFi protection
+// If WiFi is unavailable continuously for 5 minutes,
+// the device enters NO WIFI mode and hides sensor values.
+const unsigned long NO_WIFI_TIMEOUT = 5UL * 60UL * 1000UL;
+unsigned long wifiLossStartTime = 0;
+bool wifiLossTimerRunning = false;
+bool noWifiMode = false;
+
+int currentScreen = 0;
+
+
+//====================================================
+// FUNCTION PROTOTYPES
+//====================================================
+
+void readMQ135();
+void readSDS011();
+void readDHT22();
+
+void updateAirQuality();
+void updateTrafficLight();
+void updateBuzzer();
+void updateLCD();
+
+void sendToBlynk();
+void updateBlynkTrafficLight();
+
+void checkWiFi();
+
+
+//====================================================
+// SETUP
+//====================================================
+
+void setup()
+{
+  //==================================================
+  // SERIAL
+  //==================================================
+
+  Serial.begin(115200);
+
+  delay(500);
+
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("PORTABLE AIR QUALITY EARLY WARNING");
+  Serial.println("DEVICE STARTING...");
+  Serial.println("======================================");
+
+
+  //==================================================
+  // DHT22
+  //==================================================
+
+  dht.begin();
+
+  Serial.println("DHT22: STARTED");
+
+
+  //==================================================
+  // LCD
+  //==================================================
+
+  Wire.begin();
+
+  lcd.init();
+  lcd.backlight();
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Air Quality");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Starting...");
+
+  delay(1000);
+
+  Serial.println("LCD: STARTED");
+
+
+  //==================================================
+  // PHYSICAL LEDS
+  //==================================================
+
+  pinMode(GREEN_LED, OUTPUT);
+  pinMode(YELLOW_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+
+  digitalWrite(GREEN_LED, LOW);
+  digitalWrite(YELLOW_LED, LOW);
+  digitalWrite(RED_LED, LOW);
+
+  Serial.println("Physical LEDs: STARTED");
+
+
+  //==================================================
+  // RESET BUTTON
+  //==================================================
+
+  pinMode(RESET_BUTTON, INPUT_PULLDOWN);
+
+  Serial.println("RESET BUTTON: STARTED");
+
+
+  //==================================================
+  // PASSIVE BUZZER
+  //==================================================
+
+  ledcAttach(
+    BUZZER,
+    BUZZER_FREQUENCY,
+    BUZZER_RESOLUTION
+  );
+
+  ledcWrite(BUZZER, 0);
+
+  Serial.println("PASSIVE BUZZER: STARTED");
+
+
+  //==================================================
+  // SDS011
+  //==================================================
+  //
+  // IMPORTANT:
+  // The installed SDS011_sensor_Library on this computer
+  // exposes ONLY this function:
+  //     my_sds.begin(uint8_t pin_rx, uint8_t pin_tx);
+  //
+  // Therefore we must use the library's pin-based setup.
+  // Do NOT use my_sds.begin(&HardwareSerial) with this
+  // particular library because it will not compile.
+  //
+  // SDS011 TX -> ESP32 GPIO16 (RX)
+  // SDS011 RX -> ESP32 GPIO17 (TX)
+  //
+  // The SDS011 communicates at 9600 baud internally.
+  // The library handles the serial interface.
+
+  my_sds.begin(SDS_RX, SDS_TX);
+
+  Serial.println("SDS011: STARTED");
+  Serial.println("SDS011: RX=GPIO16, TX=GPIO17");
+
+  // Give the SDS011 a moment to start sending measurements.
+  delay(1000);
+
+
+  //==================================================
+  // WIFI
+  //==================================================
+
+  Serial.println();
+  Serial.println("Connecting to WiFi...");
+
+  WiFi.begin(ssid, pass);
+
+  unsigned long wifiStartTime = millis();
+
+  while (
+    WiFi.status() != WL_CONNECTED &&
+    millis() - wifiStartTime < 15000
+  )
+  {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    Serial.println("WiFi CONNECTED!");
+
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+  }
+  else
+  {
+    Serial.println("WiFi CONNECTION FAILED!");
+    Serial.println("The system will keep trying to reconnect.");
+    Serial.println("NO WIFI mode will activate after 5 minutes.");
+    wifiLossStartTime = millis();
+    wifiLossTimerRunning = true;
+  }
+
+
+  //==================================================
+  // BLYNK
+  //==================================================
+
+  Serial.println();
+  Serial.println("Connecting to Blynk...");
+
+  Blynk.config(BLYNK_AUTH_TOKEN);
+
+  if (Blynk.connect(10000))
+  {
+    Serial.println("BLYNK CONNECTED!");
+  }
+  else
+  {
+    Serial.println("BLYNK CONNECTION FAILED!");
+  }
+
+
+  //==================================================
+  // INITIAL SENSOR READINGS
+  //==================================================
+
+  gasValue = analogRead(MQ135_PIN);
+
+  float firstTemperature = dht.readTemperature();
+  float firstHumidity = dht.readHumidity();
+
+  if (
+    !isnan(firstTemperature) &&
+    !isnan(firstHumidity)
+  )
+  {
+    temperature = firstTemperature;
+    humidity = firstHumidity;
+  }
+
+
+  //==================================================
+  // READY MESSAGE
+  //==================================================
+
+  lcd.clear();
+
+  lcd.setCursor(0, 0);
+  lcd.print("System Ready");
+
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring...");
+
+
+  Serial.println();
+  Serial.println("======================================");
+  Serial.println("SYSTEM READY");
+  Serial.println("======================================");
+  Serial.println();
+}
+
+
+//====================================================
+// MAIN LOOP
+//====================================================
+
+void loop()
+{
+  // Keep Blynk connection alive while WiFi is available.
+  if (!noWifiMode)
+  {
+    Blynk.run();
+  }
+
+  unsigned long currentMillis = millis();
+
+  //==================================================
+  // WIFI LOSS TIMER
+  //==================================================
+
+  if (WiFi.status() == WL_CONNECTED)
+  {
+    // WiFi is available again.
+    if (noWifiMode)
+    {
+      noWifiMode = false;
+      wifiLossTimerRunning = false;
+      wifiLossStartTime = 0;
+
+      Serial.println();
+      Serial.println("WiFi RESTORED!");
+      Serial.println("Leaving NO WIFI mode.");
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("WiFi Restored");
+      lcd.setCursor(0, 1);
+      lcd.print("Monitoring...");
+    }
+    else
+    {
+      // Any connected period resets the continuous-loss timer.
+      wifiLossTimerRunning = false;
+      wifiLossStartTime = 0;
+    }
+  }
+  else
+  {
+    // Start timing a continuous WiFi loss.
+    if (!wifiLossTimerRunning)
+    {
+      wifiLossStartTime = currentMillis;
+      wifiLossTimerRunning = true;
+
+      Serial.println("WiFi lost - starting 5 minute timer...");
+    }
+
+    // After 5 minutes without WiFi, hide all displayed sensor values.
+    if (!noWifiMode &&
+        currentMillis - wifiLossStartTime >= NO_WIFI_TIMEOUT)
+    {
+      noWifiMode = true;
+
+      Serial.println();
+      Serial.println("======================================");
+      Serial.println("NO WIFI CONNECTION");
+      Serial.println("Sensor values hidden.");
+      Serial.println("======================================");
+
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("No WiFi");
+      lcd.setCursor(0, 1);
+      lcd.print("Connection");
+
+      // Turn off physical warning outputs.
+      digitalWrite(GREEN_LED, LOW);
+      digitalWrite(YELLOW_LED, LOW);
+      digitalWrite(RED_LED, LOW);
+      ledcWrite(BUZZER, 0);
+      buzzerState = false;
+    }
+  }
+
+
+  //==================================================
+  // MQ135
+  //==================================================
+
+  if (
+    currentMillis - previousMQ >=
+    MQ_INTERVAL
+  )
+  {
+    previousMQ = currentMillis;
+
+    readMQ135();
+  }
+
+
+  //==================================================
+  // SDS011
+  //==================================================
+
+  if (
+    currentMillis - previousSDS >=
+    SDS_INTERVAL
+  )
+  {
+    previousSDS = currentMillis;
+
+    readSDS011();
+  }
+
+
+  //==================================================
+  // DHT22
+  //==================================================
+
+  if (
+    currentMillis - previousDHT >=
+    DHT_INTERVAL
+  )
+  {
+    previousDHT = currentMillis;
+
+    readDHT22();
+  }
+
+
+  //==================================================
+  // UPDATE AIR QUALITY
+  //==================================================
+
+  updateAirQuality();
+
+
+  //==================================================
+  // PHYSICAL TRAFFIC LIGHT
+  //==================================================
+
+  updateTrafficLight();
+
+
+  //==================================================
+  // BUZZER
+  //==================================================
+
+  updateBuzzer();
+
+
+  //==================================================
+  // LCD
+  //==================================================
+
+  if (
+    currentMillis - previousLCD >=
+    LCD_INTERVAL
+  )
+  {
+    previousLCD = currentMillis;
+
+    updateLCD();
+  }
+
+
+  //==================================================
+  // BLYNK
+  //==================================================
+
+  if (
+    currentMillis - previousBlynk >=
+    BLYNK_INTERVAL
+  )
+  {
+    previousBlynk = currentMillis;
+
+    sendToBlynk();
+  }
+
+
+  //==================================================
+  // RESET BUTTON
+  //==================================================
+
+  if (digitalRead(RESET_BUTTON) == HIGH)
+  {
+    Serial.println();
+    Serial.println("RESET BUTTON PRESSED");
+    Serial.println("Restarting system...");
+
+    lcd.clear();
+
+    lcd.setCursor(0, 0);
+    lcd.print("Restarting...");
+
+    ledcWrite(BUZZER, 0);
+
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(YELLOW_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+
+    delay(500);
+
+    ESP.restart();
+  }
+
+
+  //==================================================
+  // CONNECTION CHECK
+  //==================================================
+
+  if (
+    currentMillis - previousConnectionCheck >=
+    CONNECTION_INTERVAL
+  )
+  {
+    previousConnectionCheck = currentMillis;
+
+    checkWiFi();
+  }
+}
+
+
+//====================================================
+// READ MQ135
+//====================================================
+
+void readMQ135()
+{
+  /*
+     Take 5 quick readings.
+
+     This makes the ESP32 ADC reading smoother
+     while still responding quickly to changes.
+
+     IMPORTANT:
+     This does not physically speed up the
+     MQ135's chemical response.
+  */
+
+  const int samples = 5;
+
+  long total = 0;
+
+  for (int i = 0; i < samples; i++)
+  {
+    total += analogRead(MQ135_PIN);
+  }
+
+  gasValue = total / samples;
+}
+
+
+//====================================================
+// READ SDS011
+//====================================================
+
+void readSDS011()
+{
+  float newPM25 = 0.0;
+  float newPM10 = 0.0;
+
+  int error = my_sds.read(
+    &newPM25,
+    &newPM10
+  );
+
+  if (error == 0)
+  {
+    // A valid fresh packet was received.
+    pm25 = newPM25;
+    pm10 = newPM10;
+
+    Serial.print("SDS011 | PM2.5: ");
+    Serial.print(pm25, 1);
+
+    Serial.print(" ug/m3 | PM10: ");
+    Serial.print(pm10, 1);
+
+    Serial.println(" ug/m3");
+  }
+  else if (error == 1)
+  {
+    // Error code 1 from this SDS011 library means that no
+    // new measurement packet was available at this instant.
+    // It is NOT a sensor fault. Keep the previous valid PM
+    // values and do not spam the Serial Monitor.
+  }
+  else
+  {
+    // Other error codes are worth reporting.
+    Serial.print("SDS011 read error: ");
+    Serial.println(error);
+  }
+}
+
+//====================================================
+// READ DHT22
+//====================================================
+
+void readDHT22()
+{
+  float newTemperature =
+    dht.readTemperature();
+
+  float newHumidity =
+    dht.readHumidity();
+
+
+  if (
+    !isnan(newTemperature) &&
+    !isnan(newHumidity)
+  )
+  {
+    temperature = newTemperature;
+    humidity = newHumidity;
+
+    Serial.print("DHT22 | Temp: ");
+    Serial.print(temperature, 1);
+
+    Serial.print(" C | Humidity: ");
+    Serial.print(humidity, 1);
+
+    Serial.println(" %");
+  }
+  else
+  {
+    Serial.println("DHT22 ERROR!");
+  }
+}
+
+
+//====================================================
+// AIR QUALITY LOGIC
+//====================================================
+
+void updateAirQuality()
+{
+  bool highCondition = false;
+  bool moderateCondition = false;
+
+
+  //==================================================
+  // PM2.5
+  //==================================================
+
+  if (pm25 > PM25_HIGH)
+  {
+    highCondition = true;
+  }
+  else if (pm25 > PM25_MODERATE)
+  {
+    moderateCondition = true;
+  }
+
+
+  //==================================================
+  // PM10
+  //==================================================
+
+  if (pm10 > PM10_HIGH)
+  {
+    highCondition = true;
+  }
+  else if (pm10 > PM10_MODERATE)
+  {
+    moderateCondition = true;
+  }
+
+
+  //==================================================
+  // MQ135
+  //==================================================
+
+  if (gasValue > GAS_HIGH)
+  {
+    highCondition = true;
+  }
+  else if (gasValue > GAS_MODERATE)
+  {
+    moderateCondition = true;
+  }
+
+
+  //==================================================
+  // TEMPERATURE FROM DHT22
+  //==================================================
+
+  if (
+    temperature < TEMP_LOW_HIGH ||
+    temperature > TEMP_HIGH_HIGH
+  )
+  {
+    highCondition = true;
+  }
+  else if (
+    temperature < TEMP_LOW_MODERATE ||
+    temperature > TEMP_HIGH_MODERATE
+  )
+  {
+    moderateCondition = true;
+  }
+
+
+  //==================================================
+  // HUMIDITY FROM DHT22
+  //==================================================
+
+  if (
+    humidity < HUM_LOW_HIGH ||
+    humidity > HUM_HIGH_HIGH
+  )
+  {
+    highCondition = true;
+  }
+  else if (
+    humidity < HUM_LOW_MODERATE ||
+    humidity > HUM_HIGH_MODERATE
+  )
+  {
+    moderateCondition = true;
+  }
+
+
+  //==================================================
+  // FINAL STATUS
+  //==================================================
+
+  if (highCondition)
+  {
+    airStatus = "HIGH";
+  }
+  else if (moderateCondition)
+  {
+    airStatus = "MODERATE";
+  }
+  else
+  {
+    airStatus = "GOOD";
+  }
+}
+
+
+//====================================================
+// PHYSICAL TRAFFIC LIGHT
+//====================================================
+
+void updateTrafficLight()
+{
+  if (noWifiMode)
+  {
+    digitalWrite(GREEN_LED, LOW);
+    digitalWrite(YELLOW_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+    return;
+  }
+
+  if (airStatus == "HIGH")
+  {
+    // RED ON
+    digitalWrite(RED_LED, HIGH);
+
+    // Others OFF
+    digitalWrite(YELLOW_LED, LOW);
+    digitalWrite(GREEN_LED, LOW);
+  }
+
+  else if (airStatus == "MODERATE")
+  {
+    // YELLOW ON
+    digitalWrite(YELLOW_LED, HIGH);
+
+    // Others OFF
+    digitalWrite(RED_LED, LOW);
+    digitalWrite(GREEN_LED, LOW);
+  }
+
+  else
+  {
+    // GREEN ON
+    digitalWrite(GREEN_LED, HIGH);
+
+    // Others OFF
+    digitalWrite(YELLOW_LED, LOW);
+    digitalWrite(RED_LED, LOW);
+  }
+}
+
+
+//====================================================
+// BUZZER
+//====================================================
+
+void updateBuzzer()
+{
+  if (noWifiMode)
+  {
+    ledcWrite(BUZZER, 0);
+    buzzerState = false;
+    return;
+  }
+
+  //==================================================
+  // HIGH
+  // Continuous buzzer
+  //==================================================
+
+  if (airStatus == "HIGH")
+  {
+    ledcWrite(BUZZER, 128);
+
+    buzzerState = true;
+  }
+
+
+  //==================================================
+  // MODERATE
+  // Intermittent buzzer
+  //==================================================
+
+  else if (airStatus == "MODERATE")
+  {
+    if (
+      millis() - previousBuzzerMillis >=
+      500
+    )
+    {
+      previousBuzzerMillis = millis();
+
+      buzzerState = !buzzerState;
+
+      if (buzzerState)
+      {
+        ledcWrite(BUZZER, 128);
+      }
+      else
+      {
+        ledcWrite(BUZZER, 0);
+      }
+    }
+  }
+
+
+  //==================================================
+  // GOOD
+  // Silent
+  //==================================================
+
+  else
+  {
+    ledcWrite(BUZZER, 0);
+
+    buzzerState = false;
+  }
+}
+
+
+//====================================================
+// LCD
+//====================================================
+
+void updateLCD()
+{
+  lcd.clear();
+
+  if (noWifiMode)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("No WiFi");
+    lcd.setCursor(0, 1);
+    lcd.print("Connection");
+    return;
+  }
+
+
+  //==================================================
+  // SCREEN 0
+  // PM2.5 + PM10
+  //==================================================
+
+  if (currentScreen == 0)
+  {
+    lcd.setCursor(0, 0);
+
+    lcd.print("Fine Mat = ");
+    lcd.print(pm25, 1);
+
+
+    lcd.setCursor(0, 1);
+
+    lcd.print("Inhalable= ");
+    lcd.print(pm10, 1);
+  }
+
+
+  //==================================================
+  // SCREEN 1
+  // MQ135
+  //==================================================
+
+  else if (currentScreen == 1)
+  {
+    lcd.setCursor(0, 0);
+
+    lcd.print("Gas Value =");
+
+
+    lcd.setCursor(0, 1);
+
+    lcd.print(gasValue);
+  }
+
+
+  //==================================================
+  // SCREEN 2
+  // DHT22
+  //==================================================
+
+  else if (currentScreen == 2)
+  {
+    lcd.setCursor(0, 0);
+
+    lcd.print("Temp = ");
+    lcd.print(temperature, 1);
+    lcd.print(" C");
+
+
+    lcd.setCursor(0, 1);
+
+    lcd.print("Humidity = ");
+    lcd.print(humidity, 0);
+    lcd.print("%");
+  }
+
+
+  //==================================================
+  // SCREEN 3
+  // STATUS
+  //==================================================
+
+  else if (currentScreen == 3)
+  {
+    lcd.setCursor(0, 0);
+
+    lcd.print("Status =");
+
+
+    lcd.setCursor(0, 1);
+
+    lcd.print(airStatus);
+  }
+
+
+  //==================================================
+  // NEXT SCREEN
+  //==================================================
+
+  currentScreen++;
+
+  if (currentScreen > 3)
+  {
+    currentScreen = 0;
+  }
+}
+
+
+//====================================================
+// SEND SENSOR DATA TO BLYNK
+//====================================================
+
+void sendToBlynk()
+{
+  // Do not send sensor values when WiFi is unavailable.
+  if (noWifiMode || WiFi.status() != WL_CONNECTED)
+  {
+    return;
+  }
+
+  if (!Blynk.connected())
+  {
+    return;
+  }
+
+
+  //==================================================
+  // SENSOR VALUES
+  //==================================================
+
+  Blynk.virtualWrite(
+    VPIN_TEMPERATURE,
+    temperature
+  );
+
+  Blynk.virtualWrite(
+    VPIN_HUMIDITY,
+    humidity
+  );
+
+  Blynk.virtualWrite(
+    VPIN_GAS,
+    gasValue
+  );
+
+  Blynk.virtualWrite(
+    VPIN_PM25,
+    pm25
+  );
+
+  Blynk.virtualWrite(
+    VPIN_PM10,
+    pm10
+  );
+
+
+  //==================================================
+  // TEXT STATUS
+  //==================================================
+
+  Blynk.virtualWrite(
+    VPIN_STATUS,
+    airStatus
+  );
+
+
+  //==================================================
+  // BLYNK TRAFFIC LIGHT
+  //==================================================
+
+  updateBlynkTrafficLight();
+}
+
+
+//====================================================
+// BLYNK TRAFFIC LIGHT
+//====================================================
+
+void updateBlynkTrafficLight()
+{
+  if (airStatus == "GOOD")
+  {
+    // GREEN ON
+    Blynk.virtualWrite(
+      VPIN_GREEN_LED,
+      1
+    );
+
+    // YELLOW OFF
+    Blynk.virtualWrite(
+      VPIN_YELLOW_LED,
+      0
+    );
+
+    // RED OFF
+    Blynk.virtualWrite(
+      VPIN_RED_LED,
+      0
+    );
+  }
+
+
+  else if (airStatus == "MODERATE")
+  {
+    // GREEN OFF
+    Blynk.virtualWrite(
+      VPIN_GREEN_LED,
+      0
+    );
+
+    // YELLOW ON
+    Blynk.virtualWrite(
+      VPIN_YELLOW_LED,
+      1
+    );
+
+    // RED OFF
+    Blynk.virtualWrite(
+      VPIN_RED_LED,
+      0
+    );
+  }
+
+
+  else
+  {
+    // GREEN OFF
+    Blynk.virtualWrite(
+      VPIN_GREEN_LED,
+      0
+    );
+
+    // YELLOW OFF
+    Blynk.virtualWrite(
+      VPIN_YELLOW_LED,
+      0
+    );
+
+    // RED ON
+    Blynk.virtualWrite(
+      VPIN_RED_LED,
+      1
+    );
+  }
+}
+
+
+//====================================================
+// WIFI / BLYNK CONNECTION
+//====================================================
+
+void checkWiFi()
+{
+  //==================================================
+  // WIFI
+  //==================================================
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println(
+      "WiFi disconnected!"
+    );
+
+    Serial.println(
+      "Attempting WiFi reconnection..."
+    );
+
+    WiFi.disconnect();
+
+    WiFi.begin(
+      ssid,
+      pass
+    );
+
+    return;
+  }
+
+
+  //==================================================
+  // BLYNK
+  //==================================================
+
+  if (!Blynk.connected())
+  {
+    Serial.println(
+      "Blynk disconnected!"
+    );
+
+    Serial.println(
+      "Attempting Blynk reconnection..."
+    );
+
+    Blynk.connect(3000);
+
+
+    if (Blynk.connected())
+    {
+      Serial.println(
+        "BLYNK RECONNECTED!"
+      );
+    }
+    else
+    {
+      Serial.println(
+        "Blynk reconnection failed."
+      );
+    }
+  }
+}
